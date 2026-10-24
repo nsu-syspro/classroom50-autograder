@@ -18,7 +18,7 @@ FROM ubuntu:24.04
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
+    && apt-get install -y \
         ca-certificates \
         curl \
         git \
@@ -35,6 +35,13 @@ RUN apt-get update \
         python3 \
         python3-pip \
     && rm -rf /var/lib/apt/lists/*
+
+# Recommends are KEPT on purpose (no --no-install-recommends): the runner's
+# old setup test installed with recommends, so student documents rely on
+# what recommends pull in - e.g. pandoc's LaTeX template needs lmodern.sty
+# (texlive-xetex recommends), without which task1 fails with
+# "File `lmodern.sty' not found". The image is built once; fidelity wins
+# over size.
 
 # gh CLI: ubuntu:24.04's universe copy is ancient; use the official apt repo.
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
