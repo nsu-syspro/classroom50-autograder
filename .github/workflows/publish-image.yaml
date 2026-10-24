@@ -1,0 +1,100 @@
+name: Publish grade images
+
+# Builds and publishes per-assignment grading images to GHCR.
+#
+# Layout (one directory per classroom/assignment, so the repo can carry
+# images for every classroom):
+#   docker/<classroom>/<assignment>/Dockerfile
+#       -> ghcr.io/nsu-syspro/<classroom>-<assignment>:<YYYY-MM-DD> (+ :latest)
+#
+# Example: docker/mpt/markup-basics/Dockerfile
+#       -> ghcr.io/nsu-syspro/mpt-markup-basics:2026-10-24
+#
+# On push: only images whose directory (or this workflow) changed are built.
+# On workflow_dispatch: all images are rebuilt. The dated tag is the build
+# date (UTC); same-day re-runs overwrite it - bump deliberately for
+# reproducible re-grades.
+#
+# NOTE (visibility): the first push creates the GHCR package PRIVATE by
+# default. The runner requires a publicly pullable image (no pull secrets in
+# student repos) - if a package comes out private, flip it to public in org
+# package settings or link it to this public repo.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docker/**"
+      - ".github/workflows/publish-image.yaml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.list.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: List images to build
+        id: list
+        env:
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] \
+             || [ -z "$BEFORE" ] \
+             || ! git cat-file -e "$BEFORE" 2>/dev/null \
+             || git diff --name-only "$BEFORE" "$GITHUB_SHA" \
+                | grep -q '^\.github/workflows/publish-image\.yaml$'; then
+            # full rebuild: dispatch, unknown base, or this workflow changed
+            dirs=$(find docker -name Dockerfile -printf '%h\n' | sort)
+          else
+            dirs=$(git diff --name-only "$BEFORE" "$GITHUB_SHA" -- docker/ \
+              | xargs -r -n1 dirname | sort -u)
+          fi
+          echo "dirs: $dirs"
+          entries="["
+          for d in $dirs; do
+            [ -f "$d/Dockerfile" ] || continue
+            classroom=$(basename "$(dirname "$d")")
+            assignment=$(basename "$d")
+            entries="$entries{\"dir\":\"$d\",\"image\":\"ghcr.io/nsu-syspro/${classroom}-${assignment}\"},"
+          done
+          entries="${entries%,}]"
+          [ "$entries" = "]" ] && entries="[]"
+          echo "matrix=$entries" >> "$GITHUB_OUTPUT"
+
+  publish:
+    needs: discover
+    if: needs.discover.outputs.matrix != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        image: ${{ fromJSON(needs.discover.outputs.matrix) }}
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compute dated tag
+        id: tag
+        run: echo "date=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Build
+        run: |
+          docker build -t "${{ matrix.image.image }}:${{ steps.tag.outputs.date }}" \
+                       -t "${{ matrix.image.image }}:latest" \
+                       "${{ matrix.image.dir }}"
+
+      - name: Push
+        run: |
+          docker push "${{ matrix.image.image }}:${{ steps.tag.outputs.date }}"
+          docker push "${{ matrix.image.image }}:latest"
